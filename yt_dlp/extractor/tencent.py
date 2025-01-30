@@ -1,4 +1,3 @@
-import functools
 import random
 import re
 import string
@@ -8,8 +7,8 @@ from .common import InfoExtractor
 from ..aes import aes_cbc_encrypt_bytes
 from ..utils import (
     ExtractorError,
-    float_or_none,
     determine_ext,
+    float_or_none,
     int_or_none,
     js_to_json,
     traverse_obj,
@@ -25,7 +24,7 @@ class TencentBaseIE(InfoExtractor):
         if api_response.get('code') != '0.0' and msg is not None:
             if msg in (
                 '您所在区域暂无此内容版权（如设置VPN请关闭后重试）',
-                'This content is not available in your area due to copyright restrictions. Please choose other videos.'
+                'This content is not available in your area due to copyright restrictions. Please choose other videos.',
             ):
                 self.raise_geo_restricted()
             raise ExtractorError(f'Tencent said: {msg}')
@@ -163,11 +162,9 @@ class VQQBaseIE(TencentBaseIE):
     _REFERER = 'v.qq.com'
 
     def _get_webpage_metadata(self, webpage, video_id):
-        return self._parse_json(
-            self._search_regex(
-                r'(?s)<script[^>]*>[^<]*window\.__pinia\s*=\s*([^<]+)</script>',
-                webpage, 'pinia data', fatal=False),
-            video_id, transform_source=js_to_json, fatal=False)
+        return self._search_json(
+            r'<script[^>]*>[^<]*window\.__(?:pinia|PINIA__)\s*=',
+            webpage, 'pinia data', video_id, transform_source=js_to_json, fatal=False)
 
 
 class VQQVideoIE(VQQBaseIE):
@@ -176,7 +173,7 @@ class VQQVideoIE(VQQBaseIE):
 
     _TESTS = [{
         'url': 'https://v.qq.com/x/page/q326831cny0.html',
-        'md5': '84568b3722e15e9cd023b5594558c4a7',
+        'md5': 'b11c9cb781df710d686b950376676e2a',
         'info_dict': {
             'id': 'q326831cny0',
             'ext': 'mp4',
@@ -187,7 +184,7 @@ class VQQVideoIE(VQQBaseIE):
         },
     }, {
         'url': 'https://v.qq.com/x/page/o3013za7cse.html',
-        'md5': 'cc431c4f9114a55643893c2c8ebf5592',
+        'md5': 'a1bcf42c6d28c189bd2fe2d468abb287',
         'info_dict': {
             'id': 'o3013za7cse',
             'ext': 'mp4',
@@ -208,6 +205,7 @@ class VQQVideoIE(VQQBaseIE):
             'series': '鸡毛飞上天',
             'format_id': r're:^shd',
         },
+        'skip': '404',
     }, {
         'url': 'https://v.qq.com/x/cover/mzc00200p29k31e/s0043cwsgj0.html',
         'md5': 'fadd10bf88aec3420f06f19ee1d24c5b',
@@ -220,6 +218,7 @@ class VQQVideoIE(VQQBaseIE):
             'series': '青年理工工作者生活研究所',
             'format_id': r're:^shd',
         },
+        'params': {'skip_download': 'm3u8'},
     }, {
         # Geo-restricted to China
         'url': 'https://v.qq.com/x/cover/mcv8hkc8zk8lnov/x0036x5qqsr.html',
@@ -278,7 +277,7 @@ class VQQSeriesIE(VQQBaseIE):
             webpage)]
 
         return self.playlist_from_matches(
-            episode_paths, series_id, ie=VQQVideoIE, getter=functools.partial(urljoin, url),
+            episode_paths, series_id, ie=VQQVideoIE, getter=urljoin(url),
             title=self._get_clean_title(traverse_obj(webpage_metadata, ('coverInfo', 'title'))
                                         or self._og_search_title(webpage)),
             description=(traverse_obj(webpage_metadata, ('coverInfo', 'description'))
@@ -328,7 +327,7 @@ class WeTvBaseIE(TencentBaseIE):
                          or re.findall(r'<a[^>]+class="play-video__link"[^>]+href="(?P<path>[^"]+)', webpage))
 
         return self.playlist_from_matches(
-            episode_paths, series_id, ie=ie, getter=functools.partial(urljoin, url),
+            episode_paths, series_id, ie=ie, getter=urljoin(url),
             title=self._get_clean_title(traverse_obj(webpage_metadata, ('coverInfo', 'title'))
                                         or self._og_search_title(webpage)),
             description=(traverse_obj(webpage_metadata, ('coverInfo', 'description'))

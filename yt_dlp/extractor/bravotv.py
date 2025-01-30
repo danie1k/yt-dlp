@@ -1,4 +1,5 @@
 from .adobepass import AdobePassIE
+from ..networking import HEADRequest
 from ..utils import (
     extract_attributes,
     float_or_none,
@@ -144,17 +145,19 @@ class BravoTVIE(AdobePassIE):
         tp_metadata = self._download_json(
             update_url_query(tp_url, {'format': 'preview'}), video_id, fatal=False)
 
-        seconds_or_none = lambda x: float_or_none(x, 1000)
         chapters = traverse_obj(tp_metadata, ('chapters', ..., {
-            'start_time': ('startTime', {seconds_or_none}),
-            'end_time': ('endTime', {seconds_or_none}),
+            'start_time': ('startTime', {float_or_none(scale=1000)}),
+            'end_time': ('endTime', {float_or_none(scale=1000)}),
         }))
         # prune pointless single chapters that span the entire duration from short videos
         if len(chapters) == 1 and not traverse_obj(chapters, (0, 'end_time')):
             chapters = None
 
-        formats, subtitles = self._extract_m3u8_formats_and_subtitles(
-            update_url_query(f'{tp_url}/stream.m3u8', query), video_id, 'mp4', m3u8_id='hls')
+        m3u8_url = self._request_webpage(HEADRequest(
+            update_url_query(f'{tp_url}/stream.m3u8', query)), video_id, 'Checking m3u8 URL').url
+        if 'mpeg_cenc' in m3u8_url:
+            self.report_drm(video_id)
+        formats, subtitles = self._extract_m3u8_formats_and_subtitles(m3u8_url, video_id, 'mp4', m3u8_id='hls')
 
         return {
             'id': video_id,
@@ -164,8 +167,8 @@ class BravoTVIE(AdobePassIE):
             **merge_dicts(traverse_obj(tp_metadata, {
                 'title': 'title',
                 'description': 'description',
-                'duration': ('duration', {seconds_or_none}),
-                'timestamp': ('pubDate', {seconds_or_none}),
+                'duration': ('duration', {float_or_none(scale=1000)}),
+                'timestamp': ('pubDate', {float_or_none(scale=1000)}),
                 'season_number': (('pl1$seasonNumber', 'nbcu$seasonNumber'), {int_or_none}),
                 'episode_number': (('pl1$episodeNumber', 'nbcu$episodeNumber'), {int_or_none}),
                 'series': (('pl1$show', 'nbcu$show'), (None, ...), {str}),
@@ -181,5 +184,5 @@ class BravoTVIE(AdobePassIE):
                 'episode_number': ('episodeNumber', {int_or_none}),
                 'episode': 'episodeTitle',
                 'series': 'show',
-            }))
+            })),
         }

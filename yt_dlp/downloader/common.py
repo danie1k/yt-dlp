@@ -4,6 +4,7 @@ import functools
 import os
 import random
 import re
+import threading
 import time
 
 from ..minicurses import (
@@ -19,9 +20,7 @@ from ..utils import (
     Namespace,
     RetryManager,
     classproperty,
-    decodeArgument,
     deprecation_warning,
-    encodeFilename,
     format_bytes,
     join_nonempty,
     parse_bytes,
@@ -49,10 +48,10 @@ class FileDownloader:
     verbose:            Print additional info to stdout.
     quiet:              Do not print messages to stdout.
     ratelimit:          Download speed limit, in bytes/sec.
-    continuedl:         Attempt to continue downloads if possible
     throttledratelimit: Assume the download is being throttled below this speed (bytes/sec)
-    retries:            Number of times to retry for HTTP error 5xx
-    file_access_retries:   Number of times to retry on file access error
+    retries:            Number of times to retry for expected network errors.
+                        Default is 0 for API, but 10 for CLI
+    file_access_retries:   Number of times to retry on file access error (default: 3)
     buffersize:         Size of download buffer in bytes.
     noresizebuffer:     Do not automatically resize the download buffer.
     continuedl:         Try to continue downloads if possible.
@@ -63,6 +62,7 @@ class FileDownloader:
     min_filesize:       Skip files smaller than this size
     max_filesize:       Skip files larger than this size
     xattr_set_filesize: Set ytdl.filesize user xattribute with expected size.
+    progress_delta:     The minimum time between progress output, in seconds
     external_downloader_args:  A dictionary of downloader keys (in lower case)
                         and a list of additional command-line arguments for the
                         executable. Use 'default' as the name for arguments to be
@@ -88,6 +88,9 @@ class FileDownloader:
         self.params = params
         self._prepare_multiline_status()
         self.add_progress_hook(self.report_progress)
+        if self.params.get('progress_delta'):
+            self._progress_delta_lock = threading.Lock()
+            self._progress_delta_time = time.monotonic()
 
     def _set_ydl(self, ydl):
         self.ydl = ydl
@@ -138,17 +141,21 @@ class FileDownloader:
     def format_percent(percent):
         return '  N/A%' if percent is None else f'{percent:>5.1f}%'
 
-    @staticmethod
-    def calc_eta(start, now, total, current):
+    @classmethod
+    def calc_eta(cls, start_or_rate, now_or_remaining, total=NO_DEFAULT, current=NO_DEFAULT):
+        if total is NO_DEFAULT:
+            rate, remaining = start_or_rate, now_or_remaining
+            if None in (rate, remaining):
+                return None
+            return int(float(remaining) / rate)
+
+        start, now = start_or_rate, now_or_remaining
         if total is None:
             return None
         if now is None:
             now = time.time()
-        dif = now - start
-        if current == 0 or dif < 0.001:  # One millisecond
-            return None
-        rate = float(current) / dif
-        return int((float(total) - float(current)) / rate)
+        rate = cls.calc_speed(start, now, current)
+        return rate and int((float(total) - float(current)) / rate)
 
     @staticmethod
     def calc_speed(start, now, bytes):
@@ -164,6 +171,12 @@ class FileDownloader:
     @staticmethod
     def format_retries(retries):
         return 'inf' if retries == float('inf') else int(retries)
+
+    @staticmethod
+    def filesize_or_none(unencoded_filename):
+        if os.path.isfile(unencoded_filename):
+            return os.path.getsize(unencoded_filename)
+        return 0
 
     @staticmethod
     def best_block_size(elapsed_time, bytes):
@@ -204,7 +217,7 @@ class FileDownloader:
     def temp_name(self, filename):
         """Returns a temporary filename for the given filename."""
         if self.params.get('nopart', False) or filename == '-' or \
-                (os.path.exists(encodeFilename(filename)) and not os.path.isfile(encodeFilename(filename))):
+                (os.path.exists(filename) and not os.path.isfile(filename)):
             return filename
         return filename + '.part'
 
@@ -225,7 +238,7 @@ class FileDownloader:
                 sleep_func=fd.params.get('retry_sleep_functions', {}).get('file_access'))
 
         def wrapper(self, func, *args, **kwargs):
-            for retry in RetryManager(self.params.get('file_access_retries'), error_callback, fd=self):
+            for retry in RetryManager(self.params.get('file_access_retries', 3), error_callback, fd=self):
                 try:
                     return func(self, *args, **kwargs)
                 except OSError as err:
@@ -245,7 +258,8 @@ class FileDownloader:
 
     @wrap_file_access('remove')
     def try_remove(self, filename):
-        os.remove(filename)
+        if os.path.isfile(filename):
+            os.remove(filename)
 
     @wrap_file_access('rename')
     def try_rename(self, old_filename, new_filename):
@@ -257,7 +271,7 @@ class FileDownloader:
         """Try to set the last-modified time of the given file."""
         if last_modified_hdr is None:
             return
-        if not os.path.isfile(encodeFilename(filename)):
+        if not os.path.isfile(filename):
             return
         timestr = last_modified_hdr
         if timestr is None:
@@ -285,7 +299,8 @@ class FileDownloader:
             self._multiline = BreaklineStatusPrinter(self.ydl._out_files.out, lines)
         else:
             self._multiline = MultilinePrinter(self.ydl._out_files.out, lines, not self.params.get('quiet'))
-        self._multiline.allow_colors = self._multiline._HAVE_FULLCAP and not self.params.get('no_color')
+        self._multiline.allow_colors = self.ydl._allow_colors.out and self.ydl._allow_colors.out != 'no_color'
+        self._multiline._HAVE_FULLCAP = self.ydl._allow_colors.out
 
     def _finish_multiline_status(self):
         self._multiline.end()
@@ -354,6 +369,12 @@ class FileDownloader:
         if s['status'] != 'downloading':
             return
 
+        if update_delta := self.params.get('progress_delta'):
+            with self._progress_delta_lock:
+                if time.monotonic() < self._progress_delta_time:
+                    return
+                self._progress_delta_time += update_delta
+
         s.update({
             '_eta_str': self.format_eta(s.get('eta')).strip(),
             '_speed_str': self.format_speed(s.get('speed')),
@@ -381,7 +402,7 @@ class FileDownloader:
 
     def report_resuming_byte(self, resume_len):
         """Report attempt to resume at given byte."""
-        self.to_screen('[download] Resuming download at byte %s' % resume_len)
+        self.to_screen(f'[download] Resuming download at byte {resume_len}')
 
     def report_retry(self, err, count, retries, frag_index=NO_DEFAULT, fatal=True):
         """Report retry"""
@@ -407,16 +428,15 @@ class FileDownloader:
         """Download to a filename using the info from info_dict
         Return True on success and False otherwise
         """
-
         nooverwrites_and_exists = (
             not self.params.get('overwrites', True)
-            and os.path.exists(encodeFilename(filename))
+            and os.path.exists(filename)
         )
 
         if not hasattr(filename, 'write'):
             continuedl_and_exists = (
                 self.params.get('continuedl', True)
-                and os.path.isfile(encodeFilename(filename))
+                and os.path.isfile(filename)
                 and not self.params.get('nopart', False)
             )
 
@@ -426,7 +446,7 @@ class FileDownloader:
                 self._hook_progress({
                     'filename': filename,
                     'status': 'finished',
-                    'total_bytes': os.path.getsize(encodeFilename(filename)),
+                    'total_bytes': os.path.getsize(filename),
                 }, info_dict)
                 self._finish_multiline_status()
                 return True, False
@@ -467,9 +487,7 @@ class FileDownloader:
         if not self.params.get('verbose', False):
             return
 
-        str_args = [decodeArgument(a) for a in args]
-
         if exe is None:
-            exe = os.path.basename(str_args[0])
+            exe = os.path.basename(args[0])
 
-        self.write_debug(f'{exe} command line: {shell_quote(str_args)}')
+        self.write_debug(f'{exe} command line: {shell_quote(args)}')
